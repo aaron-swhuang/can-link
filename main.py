@@ -4,54 +4,60 @@ import time
 import platform
 import logging
 import binascii
+import traceback
 from datetime import datetime
 from ctypes import *
+from contextlib import contextmanager
 
-# --- 1. 全局路徑與環境初始化 (必須在 import zlgcan 之前) ---
+# --- 1. 全局路徑與環境初始化 ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 zlg_folder_path = os.path.normpath(os.path.join(current_dir, "zlg"))
 
-# 配置 Python 搜尋路徑
 if os.path.exists(zlg_folder_path):
     if zlg_folder_path not in sys.path:
         sys.path.insert(0, zlg_folder_path)
-    # 配置 Windows DLL 搜尋權限 (Python 3.8+)
     if platform.system() == "Windows":
         try:
             os.add_dll_directory(zlg_folder_path)
         except:
             pass
 
-# --- 2. 頂層導入 ZLG SDK (採用瞬間目錄切換技術) ---
+# --- 2. 核心環境保護器 ---
+@contextmanager
+def zlg_env():
+    """上下文管理器：確保在執行 ZLG 相關代碼時，工作目錄正確切換至 zlg 資料夾"""
+    _old_cwd = os.getcwd()
+    try:
+        os.chdir(zlg_folder_path)
+        yield
+    finally:
+        os.chdir(_old_cwd)
+
+# --- 3. 頂層導入 ZLG SDK ---
 ZLG_SDK_AVAILABLE = False
 import_error_msg = ""
 try:
-    _origin = os.getcwd()
-    # 瞬間切換到 zlg 資料夾以滿足 SDK 內部的 LoadLibrary('./zlgcan.dll')
-    os.chdir(zlg_folder_path)
-    import zlgcan
-    # 取得核心類別與常數
-    ZCAN = zlgcan.ZCAN
-    ZCAN_Transmit_Data = zlgcan.ZCAN_Transmit_Data
-    ZCAN_CHANNEL_INIT_CONFIG = zlgcan.ZCAN_CHANNEL_INIT_CONFIG
-    INVALID_DEVICE_HANDLE = getattr(zlgcan, 'INVALID_DEVICE_HANDLE', 0)
-    ZCAN_USBCANFD_200U = 41
-    ZCAN_USBCANFD_100U = 42
-    ZLG_SDK_AVAILABLE = True
-    os.chdir(_origin)
+    with zlg_env():
+        import zlgcan
+        ZCAN = zlgcan.ZCAN
+        ZCAN_Transmit_Data = zlgcan.ZCAN_Transmit_Data
+        ZCAN_TransmitFD_Data = getattr(zlgcan, 'ZCAN_TransmitFD_Data', None)
+        ZCAN_CHANNEL_INIT_CONFIG = zlgcan.ZCAN_CHANNEL_INIT_CONFIG
+        INVALID_DEVICE_HANDLE = getattr(zlgcan, 'INVALID_DEVICE_HANDLE', 0)
+        # 根據您的測試代碼導入輔助函式
+        CANFD_START_FUNC = getattr(zlgcan, 'canfd_start', None)
+
+        ZCAN_USBCANFD_200U = 41
+        ZCAN_USBCANFD_100U = 42
+        ZLG_SDK_AVAILABLE = True
 except Exception as e:
     import_error_msg = str(e)
-    try:
-        os.chdir(_origin)
-    except:
-        pass
 
-# --- 3. 第三方套件導入 ---
 import streamlit as st
 import cantools
 import pandas as pd
 
-# --- 4. 日誌機制初始化 ---
+# --- 4. 日誌機制 ---
 log_dir = os.path.join(current_dir, "log")
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
@@ -84,104 +90,170 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 6. 硬體操作包裝器 ---
-def safe_hw_call(func, *args, **kwargs):
-    if not ZLG_SDK_AVAILABLE: return None
-    _old = os.getcwd()
-    try:
-        os.chdir(zlg_folder_path)
-        return func(*args, **kwargs)
-    finally:
-        os.chdir(_old)
-
-# --- 7. 硬體管理單例 ---
+# --- 6. 硬體管理 ---
 @st.cache_resource
 def get_zcan_instance():
     if not ZLG_SDK_AVAILABLE: return None
-    logger.info("實例化 ZCAN 類別...")
-    return safe_hw_call(ZCAN)
+    with zlg_env():
+        return ZCAN()
 
 def safe_float(val, default=0.0):
     if val is None: return float(default)
     try: return float(val.value) if hasattr(val, 'value') else float(val)
     except: return float(default)
 
-# --- 8. 初始化 Session State ---
+# --- 7. 初始化 Session State ---
 if 'connected' not in st.session_state: st.session_state.connected = False
 if 'log_data' not in st.session_state: st.session_state.log_data = []
 if 'db' not in st.session_state: st.session_state.db = None
 if 'is_testing' not in st.session_state: st.session_state.is_testing = False
 if 'd_handle' not in st.session_state: st.session_state.d_handle = None
 if 'c_handle' not in st.session_state: st.session_state.c_handle = None
+if 'can_type' not in st.session_state: st.session_state.can_type = 1
 if 'hw_info_str' not in st.session_state: st.session_state.hw_info_str = ""
 
 def toggle_connection(hw_type_name):
     if not st.session_state.connected:
         if ZLG_SDK_AVAILABLE:
+            temp_handle = INVALID_DEVICE_HANDLE
             try:
                 zcanlib = get_zcan_instance()
                 dev_type = ZCAN_USBCANFD_200U if "200U" in hw_type_name else ZCAN_USBCANFD_100U
-                handle = safe_hw_call(zcanlib.OpenDevice, dev_type, 0, 0)
-                if handle == INVALID_DEVICE_HANDLE:
-                    st.error("❌ 開啟硬體失敗！請檢查 USB 與 DLL。")
-                    return
-                try:
-                    info = safe_hw_call(zcanlib.GetDeviceInf, handle)
-                    st.session_state.hw_info_str = str(info)
-                    logger.info(f"硬體連線: {info}")
-                except:
-                    st.session_state.hw_info_str = "連線成功，但資訊讀取失敗。"
-                config = ZCAN_CHANNEL_INIT_CONFIG()
-                config.can_type = 1
-                c_handle = safe_hw_call(zcanlib.InitCAN, handle, 0, config)
-                if c_handle != 0:
-                    safe_hw_call(zcanlib.StartCAN, c_handle)
-                    st.session_state.c_handle = c_handle
-                st.session_state.d_handle = handle
-                st.session_state.connected = True
-                st.toast("✅ 連線成功")
+
+                with zlg_env():
+                    # 步驟 1: 開啟設備
+                    logger.info(f"OpenDevice (Type: {dev_type})...")
+                    temp_handle = zcanlib.OpenDevice(dev_type, 0, 0)
+                    if temp_handle == INVALID_DEVICE_HANDLE:
+                        st.error("❌ 開啟硬體失敗！請檢查 USB 與連線狀態。")
+                        return
+
+                    # 步驟 2: 啟動通道 (採用您的測試代碼邏輯)
+                    logger.info("正在使用 canfd_start 啟動通道...")
+                    if st.session_state.can_type == 1 and CANFD_START_FUNC:
+                        # 使用 zlgcan.py 內建的輔助函式
+                        # 注意：zlgcan 模組內的函式通常需要傳入 lib 實例和設備控制代碼
+                        chn_handle = CANFD_START_FUNC(zcanlib, temp_handle, 0)
+                        if chn_handle == 0:
+                            raise Exception("canfd_start 失敗，請確認設備支援 FD 模式。")
+                        st.session_state.c_handle = chn_handle
+                        logger.info(f"CANFD 通道啟動成功, Channel Handle: {chn_handle}")
+                    else:
+                        # 傳統模式 fallback
+                        config = ZCAN_CHANNEL_INIT_CONFIG()
+                        config.can_type = 0
+                        chn_handle = zcanlib.InitCAN(temp_handle, 0, config)
+                        if chn_handle == 0 or zcanlib.StartCAN(chn_handle) != 1:
+                            raise Exception("傳統 CAN 通道啟動失敗。")
+                        st.session_state.c_handle = chn_handle
+
+                    # 步驟 3: 獲取資訊
+                    try:
+                        info = zcanlib.GetDeviceInf(temp_handle)
+                        st.session_state.hw_info_str = str(info)
+                    except:
+                        st.session_state.hw_info_str = "資訊讀取失敗"
+
+                    st.session_state.d_handle = temp_handle
+                    st.session_state.connected = True
+                    st.toast("✅ 連線成功")
+
             except Exception as e:
-                logger.error(f"連線崩潰: {e}")
+                logger.error(f"連線異常: {e}")
                 st.error(f"連線異常: {e}")
+                if temp_handle != INVALID_DEVICE_HANDLE:
+                    with zlg_env(): zcanlib.CloseDevice(temp_handle)
         else:
-            st.warning("⚠️ SDK 載入失敗，啟動模擬模式")
             st.session_state.connected = True
     else:
+        # 斷開連線
         if st.session_state.d_handle and ZLG_SDK_AVAILABLE:
-            safe_hw_call(get_zcan_instance().CloseDevice, st.session_state.d_handle)
+            with zlg_env(): get_zcan_instance().CloseDevice(st.session_state.d_handle)
         st.session_state.connected = False
         st.session_state.d_handle = None
         st.session_state.c_handle = None
         st.toast("🔌 已斷開")
 
+def force_release_hardware():
+    if ZLG_SDK_AVAILABLE:
+        try:
+            zcanlib = get_zcan_instance()
+            if st.session_state.d_handle:
+                with zlg_env(): zcanlib.CloseDevice(st.session_state.d_handle)
+            st.session_state.connected = False
+            st.session_state.d_handle = None
+            st.session_state.c_handle = None
+            st.success("✅ 硬體控制權已強制釋放。")
+        except Exception as e:
+            st.error(f"釋放失敗: {e}")
+
 def send_can_message(msg_id, data, silent=False):
     send_success = True
+    status_code = "1"
     if st.session_state.connected and st.session_state.c_handle and ZLG_SDK_AVAILABLE:
         try:
             zcanlib = get_zcan_instance()
-            t_data = ZCAN_Transmit_Data()
-            t_data.frame.can_id = msg_id
-            t_data.frame.can_dlc = len(data)
-            for i, b in enumerate(data): t_data.frame.data[i] = b
-            if safe_hw_call(zcanlib.Transmit, st.session_state.c_handle, byref(t_data), 1) != 1:
-                send_success = False
+            is_eff = 1 if msg_id > 0x7FF else 0
+            with zlg_env():
+                if st.session_state.can_type == 1 and ZCAN_TransmitFD_Data:
+                    # --- CANFD 發送模式 ---
+                    t_data = ZCAN_TransmitFD_Data()
+                    t_data.frame.can_id = msg_id
+                    t_data.frame.len = len(data)
+                    t_data.frame.eff = is_eff
+                    t_data.frame.fdf = 1
+                    t_data.frame.brs = 1 # 對齊您的測試代碼：開啟加速
+                    t_data.transmit_type = 0
+                    for i, b in enumerate(data):
+                        if i < 64: t_data.frame.data[i] = b
+                    ret = zcanlib.TransmitFD(st.session_state.c_handle, t_data, 1)
+                else:
+                    # --- 傳統 CAN 發送模式 ---
+                    t_data = ZCAN_Transmit_Data()
+                    t_data.frame.can_id = msg_id
+                    t_data.frame.can_dlc = len(data)
+                    t_data.frame.eff = is_eff
+                    t_data.transmit_type = 0
+                    for i, b in enumerate(data):
+                        if i < 8: t_data.frame.data[i] = b
+                    ret = zcanlib.Transmit(st.session_state.c_handle, t_data, 1)
+
+                if ret != 1:
+                    send_success = False
+                    status_code = f"Err:{ret}"
         except Exception as e:
             send_success = False
-            logger.error(f"發送失敗: {e}")
+            status_code = "EXCP"
+            logger.error(f"發送異常: {e}")
+
     timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     hex_data = " ".join(f"{b:02X}" for b in data)
-    status = "" if send_success else " ❌"
-    st.session_state.log_data.insert(0, {"時間": timestamp, "ID": hex(msg_id).upper(), "數據": hex_data + status})
+    st.session_state.log_data.insert(0, {
+        "時間": timestamp, "ID": hex(msg_id).upper(), "數據": hex_data, "狀態": "OK" if send_success else status_code
+    })
+    if not send_success and not silent:
+        st.error(f"發送失敗 (ID: {hex(msg_id).upper()})，代碼: {status_code}")
 
-# --- 9. UI 介面 ---
+# --- 8. UI 介面 ---
 with st.sidebar:
     st.subheader("🛠️ 硬體配置")
-    if not ZLG_SDK_AVAILABLE:
-        st.error(f"❌ SDK 導入失敗: {import_error_msg}")
     hw_choice = st.selectbox("設備型號", ["USBCANFD_200U", "USBCANFD_100U"])
-    if st.button("🔌 中斷連線" if st.session_state.connected else "⚡ 啟動連線", use_container_width=True):
-        toggle_connection(hw_choice)
-        st.rerun()
+    st.session_state.can_type = st.radio("通訊模式", [0, 1], format_func=lambda x: "Classic CAN" if x == 0 else "CANFD", index=1, horizontal=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("⚡ 啟動連線", use_container_width=True, disabled=st.session_state.connected):
+            toggle_connection(hw_choice)
+            st.rerun()
+    with col2:
+        if st.button("🔌 斷開連線", use_container_width=True, disabled=not st.session_state.connected):
+            toggle_connection(hw_choice)
+            st.rerun()
+
+    st.divider()
+    if st.button("🚨 強制釋放硬體", type="secondary", use_container_width=True):
+        force_release_hardware()
+
     if st.session_state.connected and st.session_state.hw_info_str:
         with st.expander("🗂️ 設備資訊", expanded=True):
             st.code(st.session_state.hw_info_str, language="text")
@@ -197,7 +269,7 @@ with st.sidebar:
 
 # --- 主畫面 ---
 status_dot = "dot-online" if st.session_state.connected else "dot-offline"
-st.markdown(f'<div class="app-header"><div class="header-title">🚗 ZLG CAN 測試工具 <span style="font-size: 0.8rem; opacity: 0.7;">v1.4.2</span></div><div class="status-indicator"><span class="dot {status_dot}"></span>{"ONLINE" if st.session_state.connected else "OFFLINE"}</div></div>', unsafe_allow_html=True)
+st.markdown(f'<div class="app-header"><div class="header-title">🚗 ZLG CAN 測試工具 <span style="font-size: 0.8rem; opacity: 0.7;">v1.5.2</span></div><div class="status-indicator"><span class="dot {status_dot}"></span>{"ONLINE" if st.session_state.connected else "OFFLINE"}</div></div>', unsafe_allow_html=True)
 
 if st.session_state.db is None:
     st.warning("👋 請先載入 DBC 檔案。")
@@ -239,8 +311,8 @@ else:
                 st.session_state.is_testing = False; st.rerun()
     with st.expander("📊 傳輸紀錄", expanded=False):
         if st.session_state.log_data:
-            st.dataframe(pd.DataFrame(st.session_state.log_data), use_container_width=True)
+            st.dataframe(pd.DataFrame(st.session_state.log_data), use_container_width=True, hide_index=True)
             if st.button("🗑️ 清空紀錄"): st.session_state.log_data = []; st.rerun()
 
 # --- 狀態列 ---
-st.markdown(f'<div class="status-bar"><span>📦 Version: v1.4.2 (Cleaned Up)</span><span style="margin-left: auto;">🕒 {datetime.now().strftime("%H:%M:%S")}</span></div>', unsafe_allow_html=True)
+st.markdown(f'<div class="status-bar"><span>📦 Version: v1.5.2 (canfd_start Alignment)</span><span style="margin-left: auto;">🕒 {datetime.now().strftime("%H:%M:%S")}</span></div>', unsafe_allow_html=True)

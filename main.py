@@ -36,7 +36,6 @@ def zlg_env():
 
 # --- 3. 頂層導入 ZLG SDK ---
 ZLG_SDK_AVAILABLE = False
-import_error_msg = ""
 try:
     with zlg_env():
         import zlgcan
@@ -54,17 +53,15 @@ try:
         ZCAN_USBCANFD_100U = 42
         ZLG_SDK_AVAILABLE = True
 except Exception as e:
-    import_error_msg = str(e)
+    print(f"[警告] SDK 導入失敗: {e}")
 
 import streamlit as st
 import cantools
 import pandas as pd
 
-# --- 4. 日誌機制配置 ---
+# --- 4. 日誌機制配置 (Debug Log 核心 - 永不刪除) ---
 log_dir = os.path.join(current_dir, "log")
-if not os.path.exists(log_dir):
-    os.makedirs(log_dir)
-
+if not os.path.exists(log_dir): os.makedirs(log_dir)
 log_filename = datetime.now().strftime("%Y-%m-%d") + ".log"
 log_filepath = os.path.join(log_dir, log_filename)
 
@@ -75,31 +72,30 @@ if not logger.handlers:
     fh.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S'))
     logger.addHandler(fh)
 
-# --- 5. 資源清理機制 ---
 def cleanup_resources():
-    """當進程結束時釋放硬體"""
-    print("\n[系統] 正在關閉 Python 進程，檢查硬體資源釋放狀態...")
+    print("\n[系統] 偵測到程式退出，正在釋放 ZLG 硬體資源...")
 atexit.register(cleanup_resources)
 
-# --- 6. 頁面配置與樣式 ---
+# --- 5. 頁面配置與樣式 ---
 st.set_page_config(page_title="ZLG CAN 測試工具", layout="wide", initial_sidebar_state="expanded")
 st.markdown("""
 <style>
     .stDeployButton, [data-testid="stAppDeployButton"] { display: none !important; }
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    .block-container { padding-top: 3.5rem !important; padding-bottom: 2rem !important; padding-left: 3rem !important; padding-right: 3rem !important; }
-    .app-header { background: linear-gradient(90deg, #0f172a 0%, #1e3a8a 100%); padding: 15px 25px; border-radius: 10px; color: white; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
-    .status-indicator { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 0.9rem; }
+    .block-container { padding-top: 1.5rem !important; }
+    .app-header { background: linear-gradient(90deg, #1e293b 0%, #334155 100%); padding: 12px 20px; border-radius: 8px; color: white; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; border-bottom: 3px solid #3b82f6; }
+    .status-indicator { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; }
     .dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; }
     .dot-online { background-color: #4ade80; box-shadow: 0 0 8px #4ade80; animation: blink 2s infinite; }
     .dot-offline { background-color: #94a3b8; }
     @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
-    .status-bar { position: fixed; bottom: 0; left: 0; width: 100%; height: 30px; background-color: #f8fafc; border-top: 1px solid #e2e8f0; z-index: 9999; display: flex; align-items: center; padding: 0 20px; font-size: 0.75rem; color: #64748b; }
+    .section-title { font-size: 0.9rem; font-weight: 600; color: #475569; margin-bottom: 8px; padding-left: 5px; border-left: 4px solid #3b82f6; }
+    .status-bar { position: fixed; bottom: 0; left: 0; width: 100%; height: 25px; background-color: #f8fafc; border-top: 1px solid #e2e8f0; z-index: 9999; display: flex; align-items: center; padding: 0 20px; font-size: 0.7rem; color: #64748b; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 7. 硬體管理 ---
+# --- 6. 硬體與輔助功能 ---
 @st.cache_resource
 def get_zcan_instance():
     if not ZLG_SDK_AVAILABLE: return None
@@ -111,19 +107,20 @@ def safe_float(val, default=0.0):
     try: return float(val.value) if hasattr(val, 'value') else float(val)
     except: return float(default)
 
-# --- 8. Session State 初始化 ---
+# --- 7. 初始化 Session State ---
 if 'connected' not in st.session_state: st.session_state.connected = False
 if 'log_data' not in st.session_state: st.session_state.log_data = []
 if 'db' not in st.session_state: st.session_state.db = None
-if 'is_testing' not in st.session_state: st.session_state.is_testing = False
+if 'added_messages' not in st.session_state: st.session_state.added_messages = []
+if 'focused_msg_idx' not in st.session_state: st.session_state.focused_msg_idx = None
+if 'sig_values' not in st.session_state: st.session_state.sig_values = {}
 if 'is_monitoring' not in st.session_state: st.session_state.is_monitoring = False
 if 'd_handle' not in st.session_state: st.session_state.d_handle = None
 if 'c_handle' not in st.session_state: st.session_state.c_handle = None
 if 'can_type' not in st.session_state: st.session_state.can_type = 1
-if 'hw_info_str' not in st.session_state: st.session_state.hw_info_str = ""
 
 def toggle_connection(hw_type_name):
-    """連線/斷開邏輯"""
+    """連線/斷開邏輯，包含詳細 Debug Log"""
     if not st.session_state.connected:
         if ZLG_SDK_AVAILABLE:
             temp_handle = INVALID_DEVICE_HANDLE
@@ -134,43 +131,51 @@ def toggle_connection(hw_type_name):
                     logger.info(f"嘗試開啟設備 (Type: {dev_type})...")
                     temp_handle = zcanlib.OpenDevice(dev_type, 0, 0)
                     if temp_handle == INVALID_DEVICE_HANDLE:
-                        logger.error("OpenDevice 失敗")
+                        logger.error("OpenDevice 失敗：回傳 INVALID_DEVICE_HANDLE")
                         st.error("❌ 開啟失敗：設備可能被佔用"); return
-                    logger.info(f"OpenDevice 成功, Handle: {temp_handle}")
+                    logger.info(f"OpenDevice 成功, Device Handle: {temp_handle}")
                     if st.session_state.can_type == 1 and CANFD_START_FUNC:
-                        logger.info("執行 CANFD 啟動流程...")
+                        logger.info("執行 CANFD 啟動流程 (canfd_start)...")
                         chn_handle = CANFD_START_FUNC(zcanlib, temp_handle, 0)
-                        if chn_handle == 0: raise Exception("canfd_start 失敗")
+                        if chn_handle == 0:
+                            logger.error("canfd_start 失敗：回傳 0")
+                            raise Exception("canfd_start 失敗")
                         st.session_state.c_handle = chn_handle
+                        logger.info(f"canfd_start 成功, Channel Handle: {chn_handle}")
                     else:
-                        logger.info("執行傳統 CAN 啟動流程...")
+                        logger.info("執行傳統 CAN 啟動流程 (InitCAN -> StartCAN)...")
                         config = ZCAN_CHANNEL_INIT_CONFIG()
                         config.can_type = 0
                         chn_handle = zcanlib.InitCAN(temp_handle, 0, config)
-                        if chn_handle == 0 or zcanlib.StartCAN(chn_handle) != 1: raise Exception("啟動失敗")
+                        if chn_handle == 0 or zcanlib.StartCAN(chn_handle) != 1:
+                            logger.error("CAN 通道啟動失敗")
+                            raise Exception("啟動失敗")
                         st.session_state.c_handle = chn_handle
                     try:
                         info = zcanlib.GetDeviceInf(temp_handle)
                         st.session_state.hw_info_str = str(info)
-                    except: st.session_state.hw_info_str = "資訊讀取失敗"
+                        logger.info(f"設備資訊獲取成功: {info}")
+                    except Exception as inf_e:
+                        logger.warning(f"GetDeviceInf 發生異常: {inf_e}")
                     st.session_state.d_handle = temp_handle
                     st.session_state.connected = True
-                    st.toast("✅ 硬體連線成功")
+                    st.toast("✅ 已連線")
+                    print(f"連線成功: Device={temp_handle}, Channel={chn_handle}")
             except Exception as e:
-                logger.error(f"連線異常: {e}")
+                logger.error(f"連線流程中斷於異常: {e}")
+                logger.error(traceback.format_exc())
                 st.error(f"連線失敗: {e}")
                 if temp_handle != INVALID_DEVICE_HANDLE:
                     with zlg_env(): zcanlib.CloseDevice(temp_handle)
-        else:
-            st.session_state.connected = True
     else:
         if st.session_state.d_handle:
+            logger.info(f"正在關閉設備 Handle: {st.session_state.d_handle}")
             with zlg_env(): get_zcan_instance().CloseDevice(st.session_state.d_handle)
         st.session_state.connected = False
         st.session_state.d_handle = None
         st.session_state.c_handle = None
         st.session_state.is_monitoring = False
-        st.toast("🔌 已斷開連線")
+        st.toast("🔌 已中斷")
 
 def send_can_message(msg_id, data, silent=False):
     success = True
@@ -181,26 +186,23 @@ def send_can_message(msg_id, data, silent=False):
             with zlg_env():
                 if st.session_state.can_type == 1:
                     t_data = ZCAN_TransmitFD_Data()
-                    t_data.frame.can_id = msg_id
-                    t_data.frame.len = len(data)
-                    t_data.frame.eff = 1 if msg_id > 0x7FF else 0
-                    t_data.frame.fdf = 1
-                    t_data.frame.brs = 1
+                    t_data.frame.can_id, t_data.frame.len = msg_id, len(data)
+                    t_data.frame.eff, t_data.frame.fdf, t_data.frame.brs = (1 if msg_id > 0x7FF else 0), 1, 1
                     for i, b in enumerate(data): t_data.frame.data[i] = b
                     ret = zcanlib.TransmitFD(st.session_state.c_handle, t_data, 1)
                 else:
                     t_data = ZCAN_Transmit_Data()
-                    t_data.frame.can_id = msg_id
-                    t_data.frame.can_dlc = len(data)
+                    t_data.frame.can_id, t_data.frame.can_dlc = msg_id, len(data)
                     t_data.frame.eff = 1 if msg_id > 0x7FF else 0
                     for i, b in enumerate(data): t_data.frame.data[i] = b
                     ret = zcanlib.Transmit(st.session_state.c_handle, t_data, 1)
                 if ret != 1:
                     success, status_code = False, f"Err:{ret}"
-                    logger.error(f"TX 失敗 ID: {hex(msg_id)}, SDK: {ret}")
+                    logger.error(f"TX 失敗 ID: {hex(msg_id)}, SDK 回傳: {ret}")
         except Exception as e:
             success, status_code = False, "EXCP"
-            logger.error(f"TX 異常: {e}")
+            logger.error(f"TX 發生 Python 異常 (ID: {hex(msg_id)}): {e}")
+            logger.error(traceback.format_exc())
     timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     hex_data = " ".join(f"{b:02X}" for b in data)
     st.session_state.log_data.insert(0, {"方向": "TX", "時間": timestamp, "ID": hex(msg_id).upper(), "數據": hex_data, "狀態": "OK" if success else status_code})
@@ -225,85 +227,134 @@ def poll_reception():
                     st.session_state.log_data.insert(0, {"方向": "RX", "時間": datetime.now().strftime("%H:%M:%S.%f")[:-3], "ID": hex(msgs[i].frame.can_id).upper(), "數據": hex_data, "狀態": "OK"})
             if len(st.session_state.log_data) > 200: st.session_state.log_data = st.session_state.log_data[:200]
 
-# --- 9. UI 渲染 ---
+# --- 8. UI 渲染流程 ---
 with st.sidebar:
-    st.subheader("🛠️ 硬體配置")
-    hw_choice = st.selectbox("設備型號", ["USBCANFD_200U", "USBCANFD_100U"])
-    st.session_state.can_type = st.radio("通訊模式", [0, 1], format_func=lambda x: "Classic CAN" if x == 0 else "CANFD", index=1, horizontal=True)
-    if st.button("🔌 斷開連線" if st.session_state.connected else "⚡ 啟動硬體連線", use_container_width=True, type="primary" if st.session_state.connected else "secondary"):
+    st.subheader("🛠️ 硬體設定")
+    hw_choice = st.selectbox("設備", ["USBCANFD_200U", "USBCANFD_100U"])
+    st.session_state.can_type = st.radio("模式", [0, 1], format_func=lambda x: "CAN" if x == 0 else "CANFD", index=1, horizontal=True)
+    if st.button("🔌 啟動/斷開連線", use_container_width=True, type="primary" if st.session_state.connected else "secondary"):
         toggle_connection(hw_choice); st.rerun()
     st.divider()
-    st.session_state.is_monitoring = st.toggle("📡 監控模式", value=st.session_state.is_monitoring, disabled=not st.session_state.connected or st.session_state.is_testing)
-    uploaded_dbc = st.file_uploader("載入 DBC 檔案", type=["dbc"], label_visibility="collapsed")
+    st.session_state.is_monitoring = st.toggle("📡 匯流排監控", value=st.session_state.is_monitoring, disabled=not st.session_state.connected)
+    uploaded_dbc = st.file_uploader("載入 DBC", type=["dbc"], label_visibility="collapsed")
     if uploaded_dbc:
         try:
             st.session_state.db = cantools.database.load_string(uploaded_dbc.getvalue().decode('utf-8'))
             st.success("DBC 載入成功")
-        except: st.error("DBC 解析失敗")
+        except Exception as e:
+            st.error("解析失敗"); logger.error(f"DBC 解析失敗: {e}")
 
+# 主畫面標頭
 status_dot = "dot-online" if st.session_state.connected else "dot-offline"
-st.markdown(f'<div class="app-header"><div>🚗 ZLG CAN 測試工具 v1.5.9</div><div class="status-indicator"><span class="dot {status_dot}"></span>{"ONLINE" if st.session_state.connected else "OFFLINE"}</div></div>', unsafe_allow_html=True)
+st.markdown(f'<div class="app-header"><div>🚗 ZLG CAN 測試工具 v1.7.6</div><div class="status-indicator"><span class="dot {status_dot}"></span>{"ONLINE" if st.session_state.connected else "OFFLINE"}</div></div>', unsafe_allow_html=True)
 
 if st.session_state.db is None:
-    st.warning("👋 請先載入 DBC 檔案以開始操作。")
+    st.warning("👋 請先從側邊欄載入 DBC 檔案。")
 else:
-    tab1, tab2 = st.tabs(["🎮 手動控制", "🚀 自動化測試"])
-    msg_list = [m.name for m in st.session_state.db.messages]
-    with tab1:
-        sel_msg = st.selectbox("選擇報文", msg_list)
-        msg_obj = st.session_state.db.get_message_by_name(sel_msg)
-        input_sigs = {}
-        with st.container(border=True):
-            for sig in msg_obj.signals:
-                s_min, s_max = float(safe_float(sig.minimum, 0)), float(safe_float(sig.maximum, 100))
-                s_init = max(min(safe_float(sig.initial, s_min), s_max), s_min)
-                input_sigs[sig.name] = st.slider(f"{sig.name}", s_min, s_max, s_init)
-        if st.button("🚀 發送數據", use_container_width=True, disabled=not st.session_state.connected):
-            try: send_can_message(msg_obj.frame_id, msg_obj.encode(input_sigs))
-            except Exception as e: st.error(f"編碼失敗: {e}")
-    with tab2:
-        st.subheader("🚀 訊號掃掠測試")
-        c1, c2 = st.columns(2)
-        t_msg_name = c1.selectbox("目標報文", msg_list, key="a_m")
-        t_msg = st.session_state.db.get_message_by_name(t_msg_name)
-        t_sig_name = c2.selectbox("目標訊號", [s.name for s in t_msg.signals])
-        t_sig = t_msg.get_signal_by_name(t_sig_name)
-        col_p1, col_p2, col_p3, col_p4 = st.columns(4)
-        start_v = col_p1.number_input("起始值", value=float(safe_float(t_sig.minimum, 0)))
-        end_v = col_p2.number_input("結束值", value=float(safe_float(t_sig.maximum, 100)))
-        step_v = col_p3.number_input("步進值", value=1.0)
-        freq_v = col_p4.number_input("間隔(ms)", value=50)
-        if not st.session_state.is_testing:
-            if st.button("▶️ 啟動掃掠測試", use_container_width=True, type="primary", disabled=not st.session_state.connected):
-                st.session_state.is_testing = True; st.rerun()
-        else:
-            st.button("⏹️ 停止測試", on_click=lambda: st.session_state.update({"is_testing": False}))
-            p_bar, metric_val, log_view = st.progress(0), st.empty(), st.empty()
-            curr_sigs = {s.name: safe_float(s.initial, safe_float(s.minimum, 0.0)) for s in t_msg.signals}
-            steps = int(abs(end_v - start_v) / (abs(step_v) or 1)) + 1
-            for i in range(steps):
-                if not st.session_state.is_testing: break
-                val = start_v + (i * step_v * (1 if end_v >= start_v else -1))
-                curr_sigs[t_sig_name] = val
-                try:
-                    tx_ok = send_can_message(t_msg.frame_id, t_msg.encode(curr_sigs), silent=True)
-                    p_bar.progress(i / (steps - 1))
-                    metric_val.metric(f"發送: {t_sig_name}", f"{val:.2f}", delta="OK" if tx_ok else "FAIL")
-                    log_view.dataframe(pd.DataFrame(st.session_state.log_data), use_container_width=True, hide_index=True)
-                except Exception as e: st.error(f"測試錯誤: {e}"); break
-                time.sleep(freq_v / 1000.0)
-            st.session_state.is_testing = False; st.rerun()
-    with st.expander("📊 監控日誌詳情", expanded=True):
-        log_placeholder = st.empty()
-        if st.button("🗑️ 清空日誌紀錄"): st.session_state.log_data = []; st.rerun()
+    # --- 1. 頂層發送按鈕區 ---
+    main_cols = st.columns([3, 1])
+    with main_cols[0]:
+        st.markdown('<p class="section-title">報文與發送控制</p>', unsafe_allow_html=True)
+    with main_cols[1]:
+        btn_label = "🚀 發送報文"
+        if st.session_state.focused_msg_idx is not None:
+            m_name = st.session_state.added_messages[st.session_state.focused_msg_idx]
+            m_obj = st.session_state.db.get_message_by_name(m_name)
+            btn_label = f"🚀 發送 [0x{m_obj.frame_id:03X}]"
+        if st.button(btn_label, use_container_width=True, type="primary", disabled=not st.session_state.connected or st.session_state.focused_msg_idx is None):
+            current_payload = st.session_state.sig_values.get(m_name, {})
+            try:
+                full_sigs = {s.name: safe_float(s.initial, safe_float(s.minimum, 0.0)) for s in m_obj.signals}
+                full_sigs.update(current_payload)
+                send_can_message(m_obj.frame_id, m_obj.encode(full_sigs))
+            except Exception as e:
+                st.error(f"發送失敗: {e}"); logger.error(f"發送編碼異常: {e}")
 
-# --- 10. 監控循環與 UI 同步 ---
-if st.session_state.is_monitoring and not st.session_state.is_testing:
+    # --- 2. 報文添加與列表區 ---
+    item_cols = st.columns([3, 1, 2])
+    with item_cols[0]:
+        all_msgs_map = {f"{m.name} [0x{m.frame_id:03X}] ({m.frame_id})": m.name for m in st.session_state.db.messages}
+        target_display_to_add = st.selectbox("選取報文 (ID)", list(all_msgs_map.keys()), label_visibility="collapsed")
+        target_name_to_add = all_msgs_map[target_display_to_add]
+    with item_cols[1]:
+        if st.button("➕ 添加到清單", use_container_width=True):
+            if target_name_to_add not in st.session_state.added_messages:
+                st.session_state.added_messages.append(target_name_to_add); st.rerun()
+    with st.container(border=True):
+        if not st.session_state.added_messages:
+            st.info("清單為空，請從上方選取報文。")
+        else:
+            list_cols = st.columns(len(st.session_state.added_messages) + 1)
+            for idx, msg_name in enumerate(st.session_state.added_messages):
+                is_active = (st.session_state.focused_msg_idx == idx)
+                m_obj_tmp = st.session_state.db.get_message_by_name(msg_name)
+                btn_display = f"{msg_name} [0x{m_obj_tmp.frame_id:03X}]"
+                if list_cols[idx].button(btn_display, use_container_width=True, type="primary" if is_active else "secondary"):
+                    st.session_state.focused_msg_idx = idx; st.rerun()
+            if list_cols[-1].button("🗑️", help="清空清單"):
+                st.session_state.added_messages, st.session_state.focused_msg_idx = [], None; st.rerun()
+
+    st.divider()
+
+    # --- 3. 詳細訊號控制區 ---
+    if st.session_state.focused_msg_idx is not None:
+        focused_name = st.session_state.added_messages[st.session_state.focused_msg_idx]
+        focused_obj = st.session_state.db.get_message_by_name(focused_name)
+        st.markdown(f'<p class="section-title">詳細訊號控制: {focused_name} [0x{focused_obj.frame_id:03X}] ({focused_obj.frame_id})</p>', unsafe_allow_html=True)
+        if focused_name not in st.session_state.sig_values:
+            st.session_state.sig_values[focused_name] = {s.name: safe_float(s.initial, safe_float(s.minimum, 0.0)) for s in focused_obj.signals}
+
+        def sync_signal_value(source_key, msg_name, sig_name):
+            if source_key in st.session_state:
+                st.session_state.sig_values[msg_name][sig_name] = st.session_state[source_key]
+
+        col_ratios = [0.5, 2, 3, 1, 2.5, 0.5]
+        h_cols = st.columns(col_ratios)
+        h_cols[0].caption("No.")
+        h_cols[1].caption("訊號名稱")
+        h_cols[2].caption("滑桿調節")
+        h_cols[3].caption("數值輸入")
+        h_cols[4].caption("列舉選擇")
+        h_cols[5].caption("註釋")
+
+        with st.container(height=500):
+            for i, sig in enumerate(focused_obj.signals, 1):
+                row_cols = st.columns(col_ratios)
+                row_cols[0].markdown(f"<p style='text-align:center; color:#94a3b8; padding-top:5px;'>{i}</p>", unsafe_allow_html=True)
+                row_cols[1].markdown(f"**{sig.name}**")
+                cur_val = st.session_state.sig_values[focused_name].get(sig.name, 0.0)
+                s_min, s_max = float(safe_float(sig.minimum, 0)), float(safe_float(sig.maximum, 100))
+                k_sld, k_num, k_sel = f"sld_{focused_name}_{sig.name}", f"num_{focused_name}_{sig.name}", f"sel_{focused_name}_{sig.name}"
+                row_cols[2].slider(f"S_{sig.name}", s_min, s_max, float(cur_val), label_visibility="collapsed", key=k_sld, on_change=sync_signal_value, args=(k_sld, focused_name, sig.name))
+                row_cols[3].number_input(f"I_{sig.name}", s_min, s_max, float(cur_val), label_visibility="collapsed", key=k_num, on_change=sync_signal_value, args=(k_num, focused_name, sig.name))
+                if sig.choices:
+                    choice_labels = {v: f"{v}: {str(k)}" for v, k in sig.choices.items()}
+                    sorted_vals = sorted(choice_labels.keys())
+                    try: current_idx = sorted_vals.index(int(cur_val))
+                    except: current_idx = 0
+                    row_cols[4].selectbox(f"C_{sig.name}", sorted_vals, index=current_idx, format_func=lambda x: choice_labels.get(x, str(x)), label_visibility="collapsed", key=k_sel, on_change=sync_signal_value, args=(k_sel, focused_name, sig.name))
+                else:
+                    row_cols[4].selectbox(f"NA_{sig.name}", ["-"], disabled=True, label_visibility="collapsed", key=f"na_{focused_name}_{sig.name}")
+                if sig.comment:
+                    with row_cols[5].popover("ℹ️", use_container_width=True):
+                        st.markdown("**訊號說明：**")
+                        st.write(sig.comment)
+                else:
+                    row_cols[5].markdown('<p style="text-align:center; color:#cbd5e1;">-</p>', unsafe_allow_html=True)
+
+    st.divider()
+    with st.expander("📊 匯流排監控日誌", expanded=True):
+        log_placeholder = st.empty()
+        if st.button("🗑️ 清空日誌", use_container_width=True):
+            st.session_state.log_data = []; st.rerun()
+
+# --- 9. 監控與刷新 ---
+if st.session_state.is_monitoring:
     poll_reception()
-    log_placeholder.dataframe(pd.DataFrame(st.session_state.log_data), use_container_width=True, hide_index=True)
+    log_placeholder.dataframe(pd.DataFrame(st.session_state.log_data), use_container_width=True, hide_index=True, height=300)
     time.sleep(0.1); st.rerun()
 else:
     if st.session_state.log_data:
-        log_placeholder.dataframe(pd.DataFrame(st.session_state.log_data), use_container_width=True, hide_index=True)
+        log_placeholder.dataframe(pd.DataFrame(st.session_state.log_data), use_container_width=True, hide_index=True, height=300)
 
-st.markdown(f'<div class="status-bar"><span>📦 Version: v1.5.9 (Code Cleaned)</span><span style="margin-left:auto;">📂 Log: {log_filename}</span></div>', unsafe_allow_html=True)
+st.markdown(f'<div class="status-bar"><span>📦 Version: v1.7.6 (Clean Code)</span><span style="margin-left:auto;">📂 Log: {log_filename}</span></div>', unsafe_allow_html=True)

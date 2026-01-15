@@ -74,16 +74,14 @@ def cleanup_resources():
     print("\n[系統] 偵測到程式退出，正在釋放 ZLG 硬體資源...")
 atexit.register(cleanup_resources)
 
-# --- 5. 頁面配置與樣式 (進一步縮小字體級距) ---
+# --- 5. 頁面配置與樣式 (極致緊湊與縮放) ---
 st.set_page_config(page_title="ZLG CAN 測試工具", layout="wide", initial_sidebar_state="expanded")
 st.markdown("""
 <style>
-    /* 全域字體大小再次調降一級 (0.8rem) */
     html, body, [class*="css"] { font-size: 0.8rem !important; }
     .stDeployButton, [data-testid="stAppDeployButton"] { display: none !important; }
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    /* 微調頂部間距確保 Rerun Bar 與 Header 比例協調 */
     .block-container { padding-top: 3.1rem !important; }
     .app-header { background: linear-gradient(90deg, #1e293b 0%, #334155 100%); padding: 6px 15px; border-radius: 5px; color: white; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; border-bottom: 3px solid #3b82f6; }
     .status-indicator { display: flex; align-items: center; gap: 5px; font-size: 0.7rem; }
@@ -93,7 +91,6 @@ st.markdown("""
     @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
     .section-title { font-size: 0.8rem; font-weight: 600; color: #475569; margin-bottom: 5px; padding-left: 5px; border-left: 4px solid #3b82f6; }
     .status-bar { position: fixed; bottom: 0; left: 0; width: 100%; height: 20px; background-color: #f8fafc; border-top: 1px solid #e2e8f0; z-index: 9999; display: flex; align-items: center; padding: 0 20px; font-size: 0.6rem; color: #64748b; }
-    /* 極致壓縮表單元件間距 */
     .stSelectbox, .stNumberInput, .stSlider { margin-bottom: -12px !important; }
     [data-testid="stExpander"] { margin-bottom: 5px !important; }
 </style>
@@ -253,7 +250,7 @@ with st.sidebar:
 
 # 主畫面標頭
 status_dot = "dot-online" if st.session_state.connected else "dot-offline"
-st.markdown(f'<div class="app-header"><div>🚗 ZLG CAN 測試工具 v1.8.1</div><div class="status-indicator"><span class="dot {status_dot}"></span>{"ONLINE" if st.session_state.connected else "OFFLINE"}</div></div>', unsafe_allow_html=True)
+st.markdown(f'<div class="app-header"><div>🚗 ZLG CAN 測試工具 v1.8.3</div><div class="status-indicator"><span class="dot {status_dot}"></span>{"ONLINE" if st.session_state.connected else "OFFLINE"}</div></div>', unsafe_allow_html=True)
 
 if st.session_state.db is None:
     st.warning("👋 請先從側邊欄載入 DBC 檔案。")
@@ -329,11 +326,19 @@ else:
                 row_cols = st.columns(col_ratios)
                 row_cols[0].markdown(f"<p style='text-align:center; color:#94a3b8; padding-top:5px;'>{i}</p>", unsafe_allow_html=True)
                 row_cols[1].markdown(f"**{sig.name}**")
-                cur_val = st.session_state.sig_values[focused_name].get(sig.name, 0.0)
-                s_min, s_max = float(safe_float(sig.minimum, 0)), float(safe_float(sig.maximum, 100))
+                is_int_sig = (not sig.is_float) and (sig.scale == 1) and (float(sig.offset).is_integer())
+                raw_val = st.session_state.sig_values[focused_name].get(sig.name, 0.0)
+                s_min = safe_float(sig.minimum, 0)
+                s_max = safe_float(sig.maximum, 100)
+                if is_int_sig:
+                    s_min, s_max, cur_val = int(s_min), int(s_max), int(raw_val)
+                    step_val = 1
+                else:
+                    s_min, s_max, cur_val = float(s_min), float(s_max), float(raw_val)
+                    step_val = None
                 k_sld, k_num, k_sel = f"sld_{focused_name}_{sig.name}", f"num_{focused_name}_{sig.name}", f"sel_{focused_name}_{sig.name}"
-                row_cols[2].slider(f"S_{sig.name}", s_min, s_max, float(cur_val), label_visibility="collapsed", key=k_sld, on_change=sync_signal_value, args=(k_sld, focused_name, sig.name))
-                row_cols[3].number_input(f"I_{sig.name}", s_min, s_max, float(cur_val), label_visibility="collapsed", key=k_num, on_change=sync_signal_value, args=(k_num, focused_name, sig.name))
+                row_cols[2].slider(f"S_{sig.name}", s_min, s_max, cur_val, step=step_val, label_visibility="collapsed", key=k_sld, on_change=sync_signal_value, args=(k_sld, focused_name, sig.name))
+                row_cols[3].number_input(f"I_{sig.name}", s_min, s_max, cur_val, step=step_val, label_visibility="collapsed", key=k_num, on_change=sync_signal_value, args=(k_num, focused_name, sig.name))
                 if sig.choices:
                     choice_labels = {v: f"{v}: {str(k)}" for v, k in sig.choices.items()}
                     sorted_vals = sorted(choice_labels.keys())
@@ -364,4 +369,4 @@ else:
     if st.session_state.log_data:
         log_placeholder.dataframe(pd.DataFrame(st.session_state.log_data), use_container_width=True, hide_index=True, height=300)
 
-st.markdown(f'<div class="status-bar"><span>📦 Version: v1.8.1 (Ultra Compact)</span><span style="margin-left:auto;">📂 Log: {log_filename}</span></div>', unsafe_allow_html=True)
+st.markdown(f'<div class="status-bar"><span>📦 Version: v1.8.3 (Clean & Commit)</span><span style="margin-left:auto;">📂 Log: {log_filename}</span></div>', unsafe_allow_html=True)

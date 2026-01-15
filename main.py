@@ -71,10 +71,10 @@ if not logger.handlers:
     logger.addHandler(fh)
 
 def cleanup_resources():
-    print("\n[系統] 偵測到程式退出，正在釋放 ZLG 硬體資源...")
+    print("\n[系統] 正在釋放 ZLG 硬體資源...")
 atexit.register(cleanup_resources)
 
-# --- 5. 頁面配置與樣式 (極致緊湊與縮放) ---
+# --- 5. 頁面配置與樣式 ---
 st.set_page_config(page_title="ZLG CAN 測試工具", layout="wide", initial_sidebar_state="expanded")
 st.markdown("""
 <style>
@@ -87,20 +87,20 @@ st.markdown("""
     .status-indicator { display: flex; align-items: center; gap: 5px; font-size: 0.7rem; }
     .dot { height: 7px; width: 7px; border-radius: 50%; display: inline-block; }
     .dot-online { background-color: #4ade80; box-shadow: 0 0 5px #4ade80; animation: blink 2s infinite; }
+    .dot-active { background-color: #f59e0b; box-shadow: 0 0 8px #f59e0b; animation: blink 0.5s infinite; }
     .dot-offline { background-color: #94a3b8; }
     @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
     .section-title { font-size: 0.8rem; font-weight: 600; color: #475569; margin-bottom: 5px; padding-left: 5px; border-left: 4px solid #3b82f6; }
     .status-bar { position: fixed; bottom: 0; left: 0; width: 100%; height: 20px; background-color: #f8fafc; border-top: 1px solid #e2e8f0; z-index: 9999; display: flex; align-items: center; padding: 0 20px; font-size: 0.6rem; color: #64748b; }
-    .stSelectbox, .stNumberInput, .stSlider { margin-bottom: -12px !important; }
-    [data-testid="stExpander"] { margin-bottom: 5px !important; }
+    .stSelectbox, .stNumberInput, .stSlider { margin-bottom: -12px !important; transition: opacity 0.2s; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 6. 硬體與輔助功能 ---
+# --- 6. 輔助功能 ---
 @st.cache_resource
 def get_zcan_instance():
     if not ZLG_SDK_AVAILABLE: return None
-    logger.info("正在建立 ZCAN 類別實例...")
+    logger.info("建立 ZCAN SDK 實例...")
     with zlg_env(): return ZCAN()
 
 def safe_float(val, default=0.0):
@@ -112,17 +112,20 @@ def safe_float(val, default=0.0):
 if 'connected' not in st.session_state: st.session_state.connected = False
 if 'log_data' not in st.session_state: st.session_state.log_data = []
 if 'db' not in st.session_state: st.session_state.db = None
+if 'last_dbc_hash' not in st.session_state: st.session_state.last_dbc_hash = None
 if 'added_messages' not in st.session_state: st.session_state.added_messages = []
 if 'focused_msg_idx' not in st.session_state: st.session_state.focused_msg_idx = None
 if 'sig_values' not in st.session_state: st.session_state.sig_values = {}
+if 'sig_meta' not in st.session_state: st.session_state.sig_meta = {}
 if 'is_monitoring' not in st.session_state: st.session_state.is_monitoring = False
+if 'is_cyclic' not in st.session_state: st.session_state.is_cyclic = False
+if 'cycle_ms' not in st.session_state: st.session_state.cycle_ms = 100
 if 'd_handle' not in st.session_state: st.session_state.d_handle = None
 if 'c_handle' not in st.session_state: st.session_state.c_handle = None
 if 'can_type' not in st.session_state: st.session_state.can_type = 1
 if 'hw_info_str' not in st.session_state: st.session_state.hw_info_str = ""
 
 def toggle_connection(hw_type_name):
-    """連線/斷開邏輯，包含詳細 Debug Log"""
     if not st.session_state.connected:
         if ZLG_SDK_AVAILABLE:
             temp_handle = INVALID_DEVICE_HANDLE
@@ -130,55 +133,38 @@ def toggle_connection(hw_type_name):
                 zcanlib = get_zcan_instance()
                 dev_type = ZCAN_USBCANFD_200U if "200U" in hw_type_name else ZCAN_USBCANFD_100U
                 with zlg_env():
-                    logger.info(f"嘗試開啟設備 (Type: {dev_type})...")
+                    logger.info(f"啟動硬體連線 (Type: {dev_type})...")
                     temp_handle = zcanlib.OpenDevice(dev_type, 0, 0)
                     if temp_handle == INVALID_DEVICE_HANDLE:
-                        logger.error("OpenDevice 失敗：回傳 INVALID_DEVICE_HANDLE")
-                        st.error("❌ 開啟失敗：設備可能被佔用或未插入"); return
-                    logger.info(f"OpenDevice 成功, Device Handle: {temp_handle}")
+                        logger.error("OpenDevice 失敗"); st.error("❌ 設備可能被佔用"); return
                     if st.session_state.can_type == 1 and CANFD_START_FUNC:
-                        logger.info("執行 CANFD 啟動流程...")
                         chn_handle = CANFD_START_FUNC(zcanlib, temp_handle, 0)
-                        if chn_handle == 0:
-                            logger.error("canfd_start 失敗")
-                            raise Exception("canfd_start 失敗")
+                        if chn_handle == 0: raise Exception("canfd_start 失敗")
                         st.session_state.c_handle = chn_handle
                     else:
-                        logger.info("執行傳統 CAN 啟動流程...")
                         config = ZCAN_CHANNEL_INIT_CONFIG()
                         config.can_type = 0
                         chn_handle = zcanlib.InitCAN(temp_handle, 0, config)
-                        if chn_handle == 0 or zcanlib.StartCAN(chn_handle) != 1:
-                            raise Exception("啟動失敗")
+                        if chn_handle == 0 or zcanlib.StartCAN(chn_handle) != 1: raise Exception("啟動失敗")
                         st.session_state.c_handle = chn_handle
                     try:
-                        info = zcanlib.GetDeviceInf(temp_handle)
-                        st.session_state.hw_info_str = str(info)
-                        logger.info(f"設備資訊獲取成功: {info}")
-                    except:
-                        st.session_state.hw_info_str = "資訊讀取失敗"
-                    st.session_state.d_handle = temp_handle
-                    st.session_state.connected = True
-                    st.toast("✅ 連線成功")
-                    print(f"連線成功: Device={temp_handle}")
+                        st.session_state.hw_info_str = str(zcanlib.GetDeviceInf(temp_handle))
+                    except: st.session_state.hw_info_str = "資訊讀取失敗"
+                    st.session_state.d_handle, st.session_state.connected = temp_handle, True
+                    st.toast("✅ 連線成功"); print(f"連線成功: D={temp_handle}, C={st.session_state.c_handle}")
             except Exception as e:
-                logger.error(f"連線異常: {e}")
-                logger.error(traceback.format_exc())
-                st.error(f"連線失敗: {e}")
+                logger.error(f"連線異常: {e}"); logger.error(traceback.format_exc()); st.error(f"連線失敗: {e}")
                 if temp_handle != INVALID_DEVICE_HANDLE:
                     with zlg_env(): zcanlib.CloseDevice(temp_handle)
     else:
         if st.session_state.d_handle:
-            logger.info(f"正在關閉設備 Handle: {st.session_state.d_handle}")
             with zlg_env(): get_zcan_instance().CloseDevice(st.session_state.d_handle)
         st.session_state.connected, st.session_state.d_handle, st.session_state.c_handle = False, None, None
-        st.session_state.is_monitoring = False
-        st.toast("🔌 已中斷連線")
+        st.session_state.is_monitoring = st.session_state.is_cyclic = False; st.toast("🔌 已中斷連線")
 
-def send_can_message(msg_id, data, silent=False):
-    success = True
-    status_code = "1"
-    if st.session_state.connected and st.session_state.c_handle and ZLG_SDK_AVAILABLE:
+def send_can_message(msg_id, data):
+    success, status_code = True, "1"
+    if st.session_state.connected and st.session_state.c_handle is not None and ZLG_SDK_AVAILABLE:
         try:
             zcanlib = get_zcan_instance()
             with zlg_env():
@@ -199,14 +185,19 @@ def send_can_message(msg_id, data, silent=False):
                     logger.error(f"TX 失敗 ID: {hex(msg_id)}, SDK: {ret}")
         except Exception as e:
             success, status_code = False, "EXCP"
-            logger.error(f"TX 發生異常: {e}")
+            logger.error(f"TX 發生異常 ID: {hex(msg_id)}: {e}")
+    else:
+        success, status_code = False, "OFFLINE"
     timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     hex_data = " ".join(f"{b:02X}" for b in data)
     st.session_state.log_data.insert(0, {"方向": "TX", "時間": timestamp, "ID": hex(msg_id).upper(), "數據": hex_data, "狀態": "OK" if success else status_code})
+    # 日誌上限 9999 條清理
+    if len(st.session_state.log_data) > 9999:
+        st.session_state.log_data = st.session_state.log_data[:9999]
     return success
 
 def poll_reception():
-    if not st.session_state.connected or not st.session_state.c_handle: return
+    if not st.session_state.connected or st.session_state.c_handle is None: return
     zcanlib = get_zcan_instance()
     with zlg_env():
         rcv_type = ZCAN_TYPE_CANFD if st.session_state.can_type == 1 else ZCAN_TYPE_CAN
@@ -220,11 +211,12 @@ def poll_reception():
             else:
                 msgs, actual = zcanlib.Receive(st.session_state.c_handle, rcv_num)
                 for i in range(actual):
-                    hex_data = " ".join(f"{msgs[i].frame.data[j]:02X}" for j in range(msgs[i].frame.can_dlc))
+                    hex_data = " ".join(f"{msgs[i].frame.data[j]:02X}" for j in range(msgs[i].frame.data_dlc))
                     st.session_state.log_data.insert(0, {"方向": "RX", "時間": datetime.now().strftime("%H:%M:%S.%f")[:-3], "ID": hex(msgs[i].frame.can_id).upper(), "數據": hex_data, "狀態": "OK"})
-            if len(st.session_state.log_data) > 200: st.session_state.log_data = st.session_state.log_data[:200]
+            if len(st.session_state.log_data) > 9999:
+                st.session_state.log_data = st.session_state.log_data[:9999]
 
-# --- 8. UI 渲染流程 ---
+# --- 8. UI 渲染 ---
 with st.sidebar:
     st.subheader("🛠️ 硬體設定")
     hw_choice = st.selectbox("設備型號", ["USBCANFD_200U", "USBCANFD_100U"])
@@ -239,134 +231,139 @@ with st.sidebar:
         with st.expander("🗂️ 設備資訊詳情", expanded=False):
             st.code(st.session_state.hw_info_str if st.session_state.hw_info_str else "正在讀取...", language="text")
     st.divider()
-    st.session_state.is_monitoring = st.toggle("📡 監控模式", value=st.session_state.is_monitoring, disabled=not st.session_state.connected)
+    st.session_state.is_monitoring = st.toggle("📡 匯流排監控", value=st.session_state.is_monitoring, disabled=not st.session_state.connected)
     uploaded_dbc = st.file_uploader("載入 DBC", type=["dbc"], label_visibility="collapsed")
     if uploaded_dbc:
-        try:
-            st.session_state.db = cantools.database.load_string(uploaded_dbc.getvalue().decode('utf-8'))
-            st.success("DBC 載入成功"); logger.info("使用者載入了新的 DBC 檔案")
-        except Exception as e:
-            st.error("解析失敗"); logger.error(f"DBC 解析失敗: {e}")
+        file_bytes = uploaded_dbc.getvalue()
+        file_hash = binascii.crc32(file_bytes)
+        if st.session_state.last_dbc_hash != file_hash:
+            try:
+                st.session_state.db = cantools.database.load_string(file_bytes.decode('utf-8'))
+                st.session_state.last_dbc_hash, st.session_state.sig_meta = file_hash, {}
+                st.success("DBC 載入成功"); logger.info("DBC 檔案已成功載入")
+            except: st.error("解析失敗")
 
 # 主畫面標頭
 status_dot = "dot-online" if st.session_state.connected else "dot-offline"
-st.markdown(f'<div class="app-header"><div>🚗 ZLG CAN 測試工具 v1.8.3</div><div class="status-indicator"><span class="dot {status_dot}"></span>{"ONLINE" if st.session_state.connected else "OFFLINE"}</div></div>', unsafe_allow_html=True)
+if st.session_state.is_cyclic: status_dot = "dot-active"
+status_text = "OFFLINE"
+if st.session_state.connected:
+    status_text = "CYCLIC SENDING" if st.session_state.is_cyclic else "ONLINE"
+st.markdown(f'<div class="app-header"><div>🚗 ZLG CAN 測試工具 v1.9.5</div><div class="status-indicator"><span class="dot {status_dot}"></span>{status_text}</div></div>', unsafe_allow_html=True)
 
 if st.session_state.db is None:
     st.warning("👋 請先從側邊欄載入 DBC 檔案。")
 else:
-    # --- 1. 頂層發送按鈕區 ---
-    main_cols = st.columns([3, 1])
-    with main_cols[0]:
-        st.markdown('<p class="section-title">報文與發送控制</p>', unsafe_allow_html=True)
-    with main_cols[1]:
-        btn_label = "🚀 發送報文"
-        if st.session_state.focused_msg_idx is not None:
-            m_name = st.session_state.added_messages[st.session_state.focused_msg_idx]
-            m_obj = st.session_state.db.get_message_by_name(m_name)
-            btn_label = f"🚀 發送 [0x{m_obj.frame_id:03X}]"
-        if st.button(btn_label, use_container_width=True, type="primary", disabled=not st.session_state.connected or st.session_state.focused_msg_idx is None):
+    # --- 1. 頂層發送控制區 ---
+    main_cols = st.columns([2, 1, 1, 1])
+    main_cols[0].markdown('<p class="section-title">報文與發送控制</p>', unsafe_allow_html=True)
+    m_name, m_obj = None, None
+    if st.session_state.focused_msg_idx is not None:
+        m_name = st.session_state.added_messages[st.session_state.focused_msg_idx]
+        m_obj = st.session_state.db.get_message_by_name(m_name)
+
+    if st.session_state.is_cyclic:
+        if main_cols[1].button("🛑 停止發送", use_container_width=True, type="primary"):
+            st.session_state.is_cyclic = False; st.rerun()
+    else:
+        if main_cols[1].button(f"🚀 單次發送" if not m_obj else f"🚀 [0x{m_obj.frame_id:03X}]", use_container_width=True, type="primary", disabled=not st.session_state.connected or m_obj is None):
             current_payload = st.session_state.sig_values.get(m_name, {})
             try:
                 full_sigs = {s.name: safe_float(s.initial, safe_float(s.minimum, 0.0)) for s in m_obj.signals}
-                full_sigs.update(current_payload)
-                send_can_message(m_obj.frame_id, m_obj.encode(full_sigs))
-            except Exception as e:
-                st.error(f"發送失敗: {e}"); logger.error(f"發送編碼異常: {e}")
+                full_sigs.update(current_payload); send_can_message(m_obj.frame_id, m_obj.encode(full_sigs))
+            except Exception as e: st.error(f"發送失敗: {e}")
 
-    # --- 2. 報文添加與列表區 ---
+    st.session_state.is_cyclic = main_cols[2].toggle("🔁 週期模式", value=st.session_state.is_cyclic, disabled=not st.session_state.connected or m_obj is None)
+    st.session_state.cycle_ms = main_cols[3].number_input("ms", min_value=10, max_value=5000, value=st.session_state.cycle_ms, step=10, label_visibility="collapsed")
+
+    # --- 2. 報文管理 ---
     item_cols = st.columns([3, 1, 2])
-    with item_cols[0]:
-        all_msgs_map = {f"{m.name} [0x{m.frame_id:03X}] ({m.frame_id})": m.name for m in st.session_state.db.messages}
-        target_display_to_add = st.selectbox("選取報文 (ID)", list(all_msgs_map.keys()), label_visibility="collapsed")
-        target_name_to_add = all_msgs_map[target_display_to_add]
-    with item_cols[1]:
-        if st.button("➕ 添加到清單", use_container_width=True):
-            if target_name_to_add not in st.session_state.added_messages:
-                st.session_state.added_messages.append(target_name_to_add); st.rerun()
+    all_msgs_map = {f"{m.name} [0x{m.frame_id:03X}] ({m.frame_id})": m.name for m in st.session_state.db.messages}
+    target_display = item_cols[0].selectbox("選取報文", list(all_msgs_map.keys()), label_visibility="collapsed")
+    if item_cols[1].button("➕ 添加", use_container_width=True):
+        if all_msgs_map[target_display] not in st.session_state.added_messages:
+            st.session_state.added_messages.append(all_msgs_map[target_display]); st.rerun()
     with st.container(border=True):
         if not st.session_state.added_messages:
             st.info("清單為空，請從上方選取報文。")
         else:
             list_cols = st.columns(len(st.session_state.added_messages) + 1)
             for idx, msg_name in enumerate(st.session_state.added_messages):
-                is_active = (st.session_state.focused_msg_idx == idx)
                 m_obj_tmp = st.session_state.db.get_message_by_name(msg_name)
-                btn_display = f"{msg_name} [0x{m_obj_tmp.frame_id:03X}]"
-                if list_cols[idx].button(btn_display, use_container_width=True, type="primary" if is_active else "secondary"):
+                if list_cols[idx].button(f"{msg_name} [0x{m_obj_tmp.frame_id:03X}]", use_container_width=True, type="primary" if st.session_state.focused_msg_idx == idx else "secondary"):
                     st.session_state.focused_msg_idx = idx; st.rerun()
-            if list_cols[-1].button("🗑️", help="清空"):
+            if list_cols[-1].button("🗑️"):
                 st.session_state.added_messages, st.session_state.focused_msg_idx = [], None; st.rerun()
 
     st.divider()
 
-    # --- 3. 詳細訊號控制區 ---
-    if st.session_state.focused_msg_idx is not None:
-        focused_name = st.session_state.added_messages[st.session_state.focused_msg_idx]
+    # --- 3. 週期發送引擎片段 ---
+    @st.fragment(run_every=st.session_state.cycle_ms/1000.0 if st.session_state.is_cyclic else None)
+    def render_cyclic_engine(m_name_local):
+        if st.session_state.is_cyclic and m_name_local:
+            m_obj_cyclic = st.session_state.db.get_message_by_name(m_name_local)
+            payload = st.session_state.sig_values.get(m_name_local, {})
+            try:
+                full_sigs = {s.name: safe_float(s.initial, safe_float(s.minimum, 0.0)) for s in m_obj_cyclic.signals}
+                full_sigs.update(payload)
+                send_can_message(m_obj_cyclic.frame_id, m_obj_cyclic.encode(full_sigs))
+            except: pass
+
+    # --- 4. 訊號控制局部片段 ---
+    @st.fragment
+    def render_signal_console(focused_name):
         focused_obj = st.session_state.db.get_message_by_name(focused_name)
-        st.markdown(f'<p class="section-title">詳細訊號控制: {focused_name} [0x{focused_obj.frame_id:03X}] ({focused_obj.frame_id})</p>', unsafe_allow_html=True)
+        st.markdown(f'<p class="section-title">詳細訊號控制: {focused_name} [0x{focused_obj.frame_id:03X}]</p>', unsafe_allow_html=True)
         if focused_name not in st.session_state.sig_values:
             st.session_state.sig_values[focused_name] = {s.name: safe_float(s.initial, safe_float(s.minimum, 0.0)) for s in focused_obj.signals}
+        if focused_name not in st.session_state.sig_meta:
+            st.session_state.sig_meta[focused_name] = {}
+            for s in focused_obj.signals:
+                is_int = (not s.is_float) and (s.scale == 1) and (float(s.offset).is_integer())
+                min_v, max_v = safe_float(s.minimum, 0), safe_float(s.maximum, 100)
+                st.session_state.sig_meta[focused_name][s.name] = {"is_int": is_int, "min": int(min_v) if is_int else float(min_v), "max": int(max_v) if is_int else float(max_v), "step": 1 if is_int else None}
 
-        def sync_signal_value(source_key, msg_name, sig_name):
-            if source_key in st.session_state:
-                st.session_state.sig_values[msg_name][sig_name] = st.session_state[source_key]
+        def sync_val(key, m_name, s_name):
+            if key in st.session_state: st.session_state.sig_values[m_name][s_name] = st.session_state[key]
 
         col_ratios = [0.5, 2, 3, 1, 2.5, 0.5]
         h_cols = st.columns(col_ratios)
-        h_cols[0].caption("No.")
-        h_cols[1].caption("訊號名稱")
-        h_cols[2].caption("滑桿調節")
-        h_cols[3].caption("數值輸入")
-        h_cols[4].caption("列舉選擇")
-        h_cols[5].caption("註釋")
+        h_cols[0].caption("No."); h_cols[1].caption("訊號名稱"); h_cols[2].caption("滑桿調節"); h_cols[3].caption("輸入"); h_cols[4].caption("列舉選擇"); h_cols[5].caption("註釋")
 
-        with st.container(height=500):
+        with st.container(height=450):
             for i, sig in enumerate(focused_obj.signals, 1):
+                meta = st.session_state.sig_meta[focused_name][sig.name]
                 row_cols = st.columns(col_ratios)
                 row_cols[0].markdown(f"<p style='text-align:center; color:#94a3b8; padding-top:5px;'>{i}</p>", unsafe_allow_html=True)
                 row_cols[1].markdown(f"**{sig.name}**")
-                is_int_sig = (not sig.is_float) and (sig.scale == 1) and (float(sig.offset).is_integer())
                 raw_val = st.session_state.sig_values[focused_name].get(sig.name, 0.0)
-                s_min = safe_float(sig.minimum, 0)
-                s_max = safe_float(sig.maximum, 100)
-                if is_int_sig:
-                    s_min, s_max, cur_val = int(s_min), int(s_max), int(raw_val)
-                    step_val = 1
-                else:
-                    s_min, s_max, cur_val = float(s_min), float(s_max), float(raw_val)
-                    step_val = None
+                cur_val = int(raw_val) if meta["is_int"] else float(raw_val)
                 k_sld, k_num, k_sel = f"sld_{focused_name}_{sig.name}", f"num_{focused_name}_{sig.name}", f"sel_{focused_name}_{sig.name}"
-                row_cols[2].slider(f"S_{sig.name}", s_min, s_max, cur_val, step=step_val, label_visibility="collapsed", key=k_sld, on_change=sync_signal_value, args=(k_sld, focused_name, sig.name))
-                row_cols[3].number_input(f"I_{sig.name}", s_min, s_max, cur_val, step=step_val, label_visibility="collapsed", key=k_num, on_change=sync_signal_value, args=(k_num, focused_name, sig.name))
+                row_cols[2].slider(f"S_{sig.name}", meta["min"], meta["max"], cur_val, step=meta["step"], label_visibility="collapsed", key=k_sld, on_change=sync_val, args=(k_sld, focused_name, sig.name))
+                row_cols[3].number_input(f"I_{sig.name}", meta["min"], meta["max"], cur_val, step=meta["step"], label_visibility="collapsed", key=k_num, on_change=sync_val, args=(k_num, focused_name, sig.name))
                 if sig.choices:
                     choice_labels = {v: f"{v}: {str(k)}" for v, k in sig.choices.items()}
                     sorted_vals = sorted(choice_labels.keys())
-                    try: current_idx = sorted_vals.index(int(cur_val))
-                    except: current_idx = 0
-                    row_cols[4].selectbox(f"C_{sig.name}", sorted_vals, index=current_idx, format_func=lambda x: choice_labels.get(x, str(x)), label_visibility="collapsed", key=k_sel, on_change=sync_signal_value, args=(k_sel, focused_name, sig.name))
+                    c_idx = sorted_vals.index(int(cur_val)) if int(cur_val) in sorted_vals else 0
+                    row_cols[4].selectbox(f"C_{sig.name}", sorted_vals, index=c_idx, format_func=lambda x: choice_labels.get(x, str(x)), label_visibility="collapsed", key=k_sel, on_change=sync_val, args=(k_sel, focused_name, sig.name))
                 else:
                     row_cols[4].selectbox(f"NA_{sig.name}", ["-"], disabled=True, label_visibility="collapsed", key=f"na_{focused_name}_{sig.name}")
                 if sig.comment:
-                    with row_cols[5].popover("ℹ️", use_container_width=True):
-                        st.markdown("**訊號說明：**")
-                        st.write(sig.comment)
-                else:
-                    row_cols[5].markdown('<p style="text-align:center; color:#cbd5e1;">-</p>', unsafe_allow_html=True)
+                    with row_cols[5].popover("ℹ️", use_container_width=True): st.write(sig.comment)
+                else: row_cols[5].markdown('<p style="text-align:center; color:#cbd5e1;">-</p>', unsafe_allow_html=True)
 
-    st.divider()
-    with st.expander("📊 匯流排監控日誌", expanded=True):
-        log_placeholder = st.empty()
-        if st.button("🗑️ 清空日誌", use_container_width=True):
-            st.session_state.log_data = []; st.rerun()
+    if st.session_state.focused_msg_idx is not None:
+        render_signal_console(m_name)
+        render_cyclic_engine(m_name)
 
-# --- 9. 監控與刷新 ---
-if st.session_state.is_monitoring:
-    poll_reception()
-    log_placeholder.dataframe(pd.DataFrame(st.session_state.log_data), use_container_width=True, hide_index=True, height=300)
-    time.sleep(0.1); st.rerun()
-else:
-    if st.session_state.log_data:
-        log_placeholder.dataframe(pd.DataFrame(st.session_state.log_data), use_container_width=True, hide_index=True, height=300)
+    # --- 5. 監控日誌局部片段 ---
+    @st.fragment(run_every=0.3 if (st.session_state.is_monitoring or st.session_state.is_cyclic) else None)
+    def render_monitor_log():
+        if st.session_state.is_monitoring: poll_reception()
+        with st.expander("📊 匯流排監控日誌", expanded=True):
+            st.dataframe(pd.DataFrame(st.session_state.log_data), use_container_width=True, hide_index=True, height=250)
+            if st.button("🗑️ 清空日誌", use_container_width=True):
+                st.session_state.log_data = []; st.rerun()
+    render_monitor_log()
 
-st.markdown(f'<div class="status-bar"><span>📦 Version: v1.8.3 (Clean & Commit)</span><span style="margin-left:auto;">📂 Log: {log_filename}</span></div>', unsafe_allow_html=True)
+st.markdown(f'<div class="status-bar"><span>📦 Version: v1.9.5 (Log Cap 9999)</span><span style="margin-left:auto;">📂 Log: {log_filename}</span></div>', unsafe_allow_html=True)

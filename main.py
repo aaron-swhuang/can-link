@@ -13,7 +13,6 @@ from contextlib import contextmanager
 # --- 1. 全局路徑與環境初始化 ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 zlg_folder_path = os.path.normpath(os.path.join(current_dir, "zlg"))
-
 if os.path.exists(zlg_folder_path):
     if zlg_folder_path not in sys.path:
         sys.path.insert(0, zlg_folder_path)
@@ -64,7 +63,6 @@ log_dir = os.path.join(current_dir, "log")
 if not os.path.exists(log_dir): os.makedirs(log_dir)
 log_filename = datetime.now().strftime("%Y-%m-%d") + ".log"
 log_filepath = os.path.join(log_dir, log_filename)
-
 logger = logging.getLogger("ZLG_CAN_TOOL")
 if not logger.handlers:
     logger.setLevel(logging.INFO)
@@ -76,22 +74,28 @@ def cleanup_resources():
     print("\n[系統] 偵測到程式退出，正在釋放 ZLG 硬體資源...")
 atexit.register(cleanup_resources)
 
-# --- 5. 頁面配置與樣式 ---
+# --- 5. 頁面配置與樣式 (進一步縮小字體級距) ---
 st.set_page_config(page_title="ZLG CAN 測試工具", layout="wide", initial_sidebar_state="expanded")
 st.markdown("""
 <style>
+    /* 全域字體大小再次調降一級 (0.8rem) */
+    html, body, [class*="css"] { font-size: 0.8rem !important; }
     .stDeployButton, [data-testid="stAppDeployButton"] { display: none !important; }
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    .block-container { padding-top: 1.5rem !important; }
-    .app-header { background: linear-gradient(90deg, #1e293b 0%, #334155 100%); padding: 12px 20px; border-radius: 8px; color: white; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; border-bottom: 3px solid #3b82f6; }
-    .status-indicator { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; }
-    .dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; }
-    .dot-online { background-color: #4ade80; box-shadow: 0 0 8px #4ade80; animation: blink 2s infinite; }
+    /* 微調頂部間距確保 Rerun Bar 與 Header 比例協調 */
+    .block-container { padding-top: 3.1rem !important; }
+    .app-header { background: linear-gradient(90deg, #1e293b 0%, #334155 100%); padding: 6px 15px; border-radius: 5px; color: white; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; border-bottom: 3px solid #3b82f6; }
+    .status-indicator { display: flex; align-items: center; gap: 5px; font-size: 0.7rem; }
+    .dot { height: 7px; width: 7px; border-radius: 50%; display: inline-block; }
+    .dot-online { background-color: #4ade80; box-shadow: 0 0 5px #4ade80; animation: blink 2s infinite; }
     .dot-offline { background-color: #94a3b8; }
     @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
-    .section-title { font-size: 0.9rem; font-weight: 600; color: #475569; margin-bottom: 8px; padding-left: 5px; border-left: 4px solid #3b82f6; }
-    .status-bar { position: fixed; bottom: 0; left: 0; width: 100%; height: 25px; background-color: #f8fafc; border-top: 1px solid #e2e8f0; z-index: 9999; display: flex; align-items: center; padding: 0 20px; font-size: 0.7rem; color: #64748b; }
+    .section-title { font-size: 0.8rem; font-weight: 600; color: #475569; margin-bottom: 5px; padding-left: 5px; border-left: 4px solid #3b82f6; }
+    .status-bar { position: fixed; bottom: 0; left: 0; width: 100%; height: 20px; background-color: #f8fafc; border-top: 1px solid #e2e8f0; z-index: 9999; display: flex; align-items: center; padding: 0 20px; font-size: 0.6rem; color: #64748b; }
+    /* 極致壓縮表單元件間距 */
+    .stSelectbox, .stNumberInput, .stSlider { margin-bottom: -12px !important; }
+    [data-testid="stExpander"] { margin-bottom: 5px !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -118,6 +122,7 @@ if 'is_monitoring' not in st.session_state: st.session_state.is_monitoring = Fal
 if 'd_handle' not in st.session_state: st.session_state.d_handle = None
 if 'c_handle' not in st.session_state: st.session_state.c_handle = None
 if 'can_type' not in st.session_state: st.session_state.can_type = 1
+if 'hw_info_str' not in st.session_state: st.session_state.hw_info_str = ""
 
 def toggle_connection(hw_type_name):
     """連線/斷開邏輯，包含詳細 Debug Log"""
@@ -132,37 +137,35 @@ def toggle_connection(hw_type_name):
                     temp_handle = zcanlib.OpenDevice(dev_type, 0, 0)
                     if temp_handle == INVALID_DEVICE_HANDLE:
                         logger.error("OpenDevice 失敗：回傳 INVALID_DEVICE_HANDLE")
-                        st.error("❌ 開啟失敗：設備可能被佔用"); return
+                        st.error("❌ 開啟失敗：設備可能被佔用或未插入"); return
                     logger.info(f"OpenDevice 成功, Device Handle: {temp_handle}")
                     if st.session_state.can_type == 1 and CANFD_START_FUNC:
-                        logger.info("執行 CANFD 啟動流程 (canfd_start)...")
+                        logger.info("執行 CANFD 啟動流程...")
                         chn_handle = CANFD_START_FUNC(zcanlib, temp_handle, 0)
                         if chn_handle == 0:
-                            logger.error("canfd_start 失敗：回傳 0")
+                            logger.error("canfd_start 失敗")
                             raise Exception("canfd_start 失敗")
                         st.session_state.c_handle = chn_handle
-                        logger.info(f"canfd_start 成功, Channel Handle: {chn_handle}")
                     else:
-                        logger.info("執行傳統 CAN 啟動流程 (InitCAN -> StartCAN)...")
+                        logger.info("執行傳統 CAN 啟動流程...")
                         config = ZCAN_CHANNEL_INIT_CONFIG()
                         config.can_type = 0
                         chn_handle = zcanlib.InitCAN(temp_handle, 0, config)
                         if chn_handle == 0 or zcanlib.StartCAN(chn_handle) != 1:
-                            logger.error("CAN 通道啟動失敗")
                             raise Exception("啟動失敗")
                         st.session_state.c_handle = chn_handle
                     try:
                         info = zcanlib.GetDeviceInf(temp_handle)
                         st.session_state.hw_info_str = str(info)
                         logger.info(f"設備資訊獲取成功: {info}")
-                    except Exception as inf_e:
-                        logger.warning(f"GetDeviceInf 發生異常: {inf_e}")
+                    except:
+                        st.session_state.hw_info_str = "資訊讀取失敗"
                     st.session_state.d_handle = temp_handle
                     st.session_state.connected = True
-                    st.toast("✅ 已連線")
-                    print(f"連線成功: Device={temp_handle}, Channel={chn_handle}")
+                    st.toast("✅ 連線成功")
+                    print(f"連線成功: Device={temp_handle}")
             except Exception as e:
-                logger.error(f"連線流程中斷於異常: {e}")
+                logger.error(f"連線異常: {e}")
                 logger.error(traceback.format_exc())
                 st.error(f"連線失敗: {e}")
                 if temp_handle != INVALID_DEVICE_HANDLE:
@@ -171,11 +174,9 @@ def toggle_connection(hw_type_name):
         if st.session_state.d_handle:
             logger.info(f"正在關閉設備 Handle: {st.session_state.d_handle}")
             with zlg_env(): get_zcan_instance().CloseDevice(st.session_state.d_handle)
-        st.session_state.connected = False
-        st.session_state.d_handle = None
-        st.session_state.c_handle = None
+        st.session_state.connected, st.session_state.d_handle, st.session_state.c_handle = False, None, None
         st.session_state.is_monitoring = False
-        st.toast("🔌 已中斷")
+        st.toast("🔌 已中斷連線")
 
 def send_can_message(msg_id, data, silent=False):
     success = True
@@ -198,11 +199,10 @@ def send_can_message(msg_id, data, silent=False):
                     ret = zcanlib.Transmit(st.session_state.c_handle, t_data, 1)
                 if ret != 1:
                     success, status_code = False, f"Err:{ret}"
-                    logger.error(f"TX 失敗 ID: {hex(msg_id)}, SDK 回傳: {ret}")
+                    logger.error(f"TX 失敗 ID: {hex(msg_id)}, SDK: {ret}")
         except Exception as e:
             success, status_code = False, "EXCP"
-            logger.error(f"TX 發生 Python 異常 (ID: {hex(msg_id)}): {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"TX 發生異常: {e}")
     timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     hex_data = " ".join(f"{b:02X}" for b in data)
     st.session_state.log_data.insert(0, {"方向": "TX", "時間": timestamp, "ID": hex(msg_id).upper(), "數據": hex_data, "狀態": "OK" if success else status_code})
@@ -230,23 +230,30 @@ def poll_reception():
 # --- 8. UI 渲染流程 ---
 with st.sidebar:
     st.subheader("🛠️ 硬體設定")
-    hw_choice = st.selectbox("設備", ["USBCANFD_200U", "USBCANFD_100U"])
+    hw_choice = st.selectbox("設備型號", ["USBCANFD_200U", "USBCANFD_100U"])
     st.session_state.can_type = st.radio("模式", [0, 1], format_func=lambda x: "CAN" if x == 0 else "CANFD", index=1, horizontal=True)
-    if st.button("🔌 啟動/斷開連線", use_container_width=True, type="primary" if st.session_state.connected else "secondary"):
+    conn_btn_label = "🔌 斷開連線" if st.session_state.connected else "⚡ 啟動硬體連線"
+    if st.button(conn_btn_label, use_container_width=True, type="primary" if st.session_state.connected else "secondary"):
         toggle_connection(hw_choice); st.rerun()
     st.divider()
-    st.session_state.is_monitoring = st.toggle("📡 匯流排監控", value=st.session_state.is_monitoring, disabled=not st.session_state.connected)
+    if not st.session_state.connected:
+        st.button("🗂️ 設備詳情 (請先連線)", use_container_width=True, disabled=True)
+    else:
+        with st.expander("🗂️ 設備資訊詳情", expanded=False):
+            st.code(st.session_state.hw_info_str if st.session_state.hw_info_str else "正在讀取...", language="text")
+    st.divider()
+    st.session_state.is_monitoring = st.toggle("📡 監控模式", value=st.session_state.is_monitoring, disabled=not st.session_state.connected)
     uploaded_dbc = st.file_uploader("載入 DBC", type=["dbc"], label_visibility="collapsed")
     if uploaded_dbc:
         try:
             st.session_state.db = cantools.database.load_string(uploaded_dbc.getvalue().decode('utf-8'))
-            st.success("DBC 載入成功")
+            st.success("DBC 載入成功"); logger.info("使用者載入了新的 DBC 檔案")
         except Exception as e:
             st.error("解析失敗"); logger.error(f"DBC 解析失敗: {e}")
 
 # 主畫面標頭
 status_dot = "dot-online" if st.session_state.connected else "dot-offline"
-st.markdown(f'<div class="app-header"><div>🚗 ZLG CAN 測試工具 v1.7.6</div><div class="status-indicator"><span class="dot {status_dot}"></span>{"ONLINE" if st.session_state.connected else "OFFLINE"}</div></div>', unsafe_allow_html=True)
+st.markdown(f'<div class="app-header"><div>🚗 ZLG CAN 測試工具 v1.8.1</div><div class="status-indicator"><span class="dot {status_dot}"></span>{"ONLINE" if st.session_state.connected else "OFFLINE"}</div></div>', unsafe_allow_html=True)
 
 if st.session_state.db is None:
     st.warning("👋 請先從側邊欄載入 DBC 檔案。")
@@ -291,7 +298,7 @@ else:
                 btn_display = f"{msg_name} [0x{m_obj_tmp.frame_id:03X}]"
                 if list_cols[idx].button(btn_display, use_container_width=True, type="primary" if is_active else "secondary"):
                     st.session_state.focused_msg_idx = idx; st.rerun()
-            if list_cols[-1].button("🗑️", help="清空清單"):
+            if list_cols[-1].button("🗑️", help="清空"):
                 st.session_state.added_messages, st.session_state.focused_msg_idx = [], None; st.rerun()
 
     st.divider()
@@ -357,4 +364,4 @@ else:
     if st.session_state.log_data:
         log_placeholder.dataframe(pd.DataFrame(st.session_state.log_data), use_container_width=True, hide_index=True, height=300)
 
-st.markdown(f'<div class="status-bar"><span>📦 Version: v1.7.6 (Clean Code)</span><span style="margin-left:auto;">📂 Log: {log_filename}</span></div>', unsafe_allow_html=True)
+st.markdown(f'<div class="status-bar"><span>📦 Version: v1.8.1 (Ultra Compact)</span><span style="margin-left:auto;">📂 Log: {log_filename}</span></div>', unsafe_allow_html=True)
